@@ -1,0 +1,139 @@
+import requests
+import json
+import pandas as pd
+
+# Load the Excelfile
+file_path = 'Series_ID.xlsx'
+sheet_name = 'US'
+
+# Read a specific column
+series_ids_df = pd.read_excel(
+    file_path,
+    sheet_name = sheet_name,
+    usecols = "A",  # Specify the correct column or range of columns
+    skiprows = 0 # Skip row if your header is not in the first row
+)
+
+# Check the DataFrame columns to confirm the correct column name
+print(series_ids_df.columns.tolist())
+
+# replace the column with the actual column name from my Excle file
+series_ids = series_ids_df['Series Id:'].tolist()
+
+# Crawling
+# 모든 연도와 월에 대한 데이터 추출
+data_list = []
+
+for series_id in series_ids:
+    data = {
+        'seriesid': [series_id],
+        'startyear': '2009',
+        'endyear': '2024',
+        'registrationkey': 'deb85ce781604de198dc14eb190fe49b'  # API 키 추가
+    }
+
+    url = 'https://api.bls.gov/publicAPI/v2/timeseries/data/'
+    response = requests.post(url, json=data)
+    json_data = json.loads(response.text)
+ 
+    for series in json_data.get('Results', {}).get('series', []):
+        for data_point in series.get('data', []): 
+            year = int(data_point['year'])
+            month = int(data_point['period'][1:])  # 'M' 접두사 제거
+            value = float(data_point['value'])
+            data_list.append({'SeriesID': series_id, 'Year': year, 'Month': month, 'Value': value})
+
+# DataFrame 생성
+df = pd.DataFrame(data_list)
+print(df)
+
+# DataFrame을 엑셀 파일로 저장
+df.to_excel('CPI_US_Raw.xlsx', index=False)
+
+
+
+######################  Table 있는 버젼   #########################
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Load and prepare data
+data_file_path = 'CPI_US_Raw.xlsx'
+hierarchy_file_path = 'Series_ID.xlsx'
+
+def load_and_prepare_data(data_path, hierarchy_path):
+    data_df = pd.read_excel(data_path)
+    hierarchy_df = pd.read_excel(hierarchy_path)
+    
+    # Ensure correct data types
+    data_df['Year'] = data_df['Year'].astype(int)
+    data_df['Month'] = data_df['Month'].astype(int)
+    data_df['Date'] = pd.to_datetime(data_df[['Year', 'Month']].assign(DAY=1))
+    data_df.sort_values(by=['SeriesID', 'Date'], inplace=True)
+
+    # Calculate growth rates
+    data_df['MoM'] = data_df.groupby('SeriesID')['Value'].pct_change() * 100
+    data_df['YoY'] = data_df.groupby('SeriesID')['Value'].pct_change(periods=12) * 100
+
+    # Merge with hierarchy
+    hierarchy_df.rename(columns={'Series Id:': 'SeriesID'}, inplace=True)
+    return pd.merge(data_df, hierarchy_df, on='SeriesID', how='left')
+
+def plot_growth_rates(df, category, growth_type, date_filter=None):
+    if growth_type == 'MoM' and date_filter:
+        plot_df = df[df['Date'].isin(date_filter)].copy()
+        plot_df['DateString'] = plot_df['Date'].dt.strftime('%Y-%m')
+        table_data = plot_df.pivot_table(index="Name", columns="DateString", values='MoM', aggfunc='first').fillna('-')
+        fig, axs = plt.subplots(2, 1, figsize=(10, 10), gridspec_kw={'height_ratios': [1, 3]})
+        sns.barplot(data=plot_df, x='Name', y='MoM', hue='DateString', ax=axs[1])
+    else:
+        plot_df = df.copy()
+        table_data = plot_df[plot_df['Date'].isin(date_filter)].pivot_table(index="Name", columns="Date", values='YoY', aggfunc='first').fillna('-')
+        fig, axs = plt.subplots(2, 1, figsize=(10, 10), gridspec_kw={'height_ratios': [1, 3]})
+        sns.lineplot(data=plot_df, x='Date', y='YoY', hue='Name', ax=axs[1])
+
+    axs[1].set_title(f'{growth_type} Growth Rate for {category}')
+    axs[1].set_xlabel('Date' if growth_type == 'YoY' else '')
+    axs[1].set_ylabel(f'{growth_type} Growth Rate (%)')
+    axs[1].tick_params(axis='x', rotation=45)
+    axs[1].legend(title='Date' if growth_type == 'MoM' else 'Series', bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # Format the table_data as percentages with 2 decimal points
+    if growth_type == 'MoM':
+        formatted_values = table_data.applymap(lambda x: f"{x:.2f}%" if isinstance(x, float) else x)
+    else:  # For YoY, convert the datetime index back to string for consistency
+        table_data.columns = table_data.columns.strftime('%Y-%m')
+        formatted_values = table_data.applymap(lambda x: f"{x:.2f}%" if isinstance(x, float) else x)
+    
+    # Create a table in the top subplot
+    axs[0].axis('off')  # Hide axis for the table subplot
+    table = axs[0].table(cellText=formatted_values.values, colLabels=formatted_values.columns,
+                         rowLabels=formatted_values.index, cellLoc='center', loc='center', bbox=[0, 0, 1, 1])
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.2)
+
+    plt.tight_layout()
+    plt.show()
+
+
+# Main script
+merged_df = load_and_prepare_data(data_file_path, hierarchy_file_path)
+
+# Determine the most recent two months
+recent_dates = merged_df['Date'].unique()[-2:]
+
+# Define your groups for plotting
+categories = {
+    'Level_1': ['CPI'],
+    'Level_2': ['Food', 'Energy', 'Core'],
+    'Level_3': ['Energy_Commodities', 'Energy_services', 'Core_Commodities', 'Core_Services']
+}
+
+# Generate plots for MoM and YoY growth rates by group
+for level, groups in categories.items():
+    for group in groups:
+        group_df = merged_df[merged_df[level] == group]
+        plot_growth_rates(group_df, group, 'MoM', date_filter=recent_dates)
+        plot_growth_rates(group_df, group, 'YoY', date_filter=recent_dates)
